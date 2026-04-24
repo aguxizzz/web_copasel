@@ -7,7 +7,7 @@
 # IMPORTS
 # ----------------------------
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, HTTPException, Depends, APIRouter
+from fastapi import FastAPI, HTTPException, Depends, APIRouter, Header
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, Field, validator, EmailStr
 from typing import Optional
