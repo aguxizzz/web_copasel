@@ -38,6 +38,7 @@ SECRET_KEY = os.getenv("SECRET_KEY", "change-me-in-production")
 ALGORITHM = os.getenv("ALGORITHM", "HS256")
 SECRET_NCON = int(os.getenv("SECRET_NCON", "9997"))
 PASSWORD = os.getenv("ADMIN_PASSWORD", "change-me-in-production")
+API_KEY = os.getenv("API_KEY", "change-me-in-production")
 PDF_DIR = Path(os.getenv("PDF_DIR", "app/static/pdfs"))
 IMPORTES_FILE = Path(os.getenv("IMPORTES_FILE", "app/static/montos/payments.json"))
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -145,6 +146,16 @@ class UpdateDniParams(BaseModel):
         if not v.isdigit():
             raise ValueError("Debe contener solo digitos")
         return v
+
+
+class SocioCreate(BaseModel):
+    """Socio creation request from base server."""
+    ncon: int = Field(..., gt=0, description="Numero de conexion (ncon)")
+    nombre: str = Field(..., min_length=1, description="Nombre del socio")
+    dni: Optional[int] = Field(None, description="DNI (enviar 0 si es null)")
+    cuit: Optional[int] = Field(None, description="CUIT (enviar 0 si es null)")
+    medidor: Optional[str] = Field(None, description="Numero de medidor")
+    domicilio: Optional[str] = Field(None, description="Domicilio")
     
 # ----------------------------
 # UTILITY FUNCTIONS
@@ -240,6 +251,13 @@ def decode_token(token):
 
 
 security = HTTPBearer()
+
+def verify_api_key(x_api_key: str = Header(..., alias="x-api-key")):
+    """Verify API key from base server."""
+    if x_api_key != API_KEY:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+    return True
+
 
 def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
     """
@@ -632,6 +650,43 @@ def update_dni(data: UpdateDniParams, userdata: dict = Depends(get_current_user)
             conn.rollback()
             raise HTTPException(
                 status_code=500, detail=f"Error en la base de datos: {str(e)}") from e
+        finally:
+            if cursor:
+                cursor.close()
+
+
+@app.post("/sync-socio")
+def sync_socio(data: SocioCreate, _: bool = Depends(verify_api_key)):
+    """
+    Sync a socio from base server.
+    Creates or updates a socio record. DNI and CUIT default to 0 if not provided.
+    """
+    cursor = None
+    with db_conn() as conn:
+        conn.autocommit = False
+        cursor = conn.cursor()
+        try:
+            dni = data.dni if data.dni is not None else 0
+            cuit = data.cuit if data.cuit is not None else 0
+
+            cursor.execute("""
+                INSERT INTO socios (ncon, nombre, dni, cuit, medidor, domicilio)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                ON CONFLICT (ncon) DO UPDATE SET
+                    nombre = EXCLUDED.nombre,
+                    dni = EXCLUDED.dni,
+                    cuit = EXCLUDED.cuit,
+                    medidor = EXCLUDED.medidor,
+                    domicilio = EXCLUDED.domicilio
+                RETURNING ncon
+            """, (data.ncon, data.nombre, dni, cuit, data.medidor, data.domicilio))
+
+            row = cursor.fetchone()
+            conn.commit()
+            return {"ncon": row[0], "synced": True}
+        except Exception as e:
+            conn.rollback()
+            raise HTTPException(status_code=500, detail=f"Error en la base de datos: {str(e)}") from e
         finally:
             if cursor:
                 cursor.close()
