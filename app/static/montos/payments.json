@@ -18,6 +18,16 @@
         "timestamp": "2026-03-01T18:02:49.593445"
       }
     ],
+    "1550": [
+      {
+        "sector": "SECTOR1",
+        "page": 1,
+        "amount_formatted": "30,333.47",
+        "amount_numeric": "30333.47",
+        "socio_number": "1550",
+        "timestamp": "2026-03-01T18:02:49.593445"
+      }
+    ],
     "29": [
       {
         "sector": "SECTOR1",
