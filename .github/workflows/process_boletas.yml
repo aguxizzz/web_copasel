@@ -4,7 +4,7 @@ on:
   push:
     paths:
       - 'boletas_input/**'
-    branches: [testing]
+    branches: [master]
   workflow_dispatch:
 
 permissions:
