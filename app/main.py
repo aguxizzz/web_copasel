@@ -7,19 +7,23 @@
 # IMPORTS
 # ----------------------------
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, HTTPException, Depends, APIRouter, Header
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi import (
+    FastAPI, HTTPException, Depends, APIRouter, Header,
+    UploadFile, File, Form, BackgroundTasks,
+)
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from pydantic import BaseModel, Field, validator, EmailStr
 from typing import Optional
 from fastapi.middleware.cors import CORSMiddleware
 import os
+import re
+import uuid
 from pathlib import Path
 from dotenv import load_dotenv
+from fastapi import Response
 from fastapi.responses import HTMLResponse, JSONResponse
 from jose import jwt, JWTError
 from datetime import datetime, timedelta, timezone
-from fastapi.responses import FileResponse
-import json
 from fastapi.staticfiles import StaticFiles
 # # #
 
@@ -30,19 +34,33 @@ if env_path.exists():
     load_dotenv(env_path)
 
 from app.database import db_conn, pool
+from app import boletas_processor
 
 # ----------------------------
 # CONFIGURATION & CONSTANTS
 # ----------------------------
-SECRET_KEY = os.getenv("SECRET_KEY", "change-me-in-production")
+def _require_secret(name: str) -> str:
+    """Lee un secreto del entorno; revienta si falta o sigue con el placeholder."""
+    value = os.getenv(name)
+    if not value or value == "change-me-in-production":
+        raise RuntimeError(
+            f"{name} no esta configurada. Defini un valor real (ej. un UUID) "
+            "en las variables de entorno antes de arrancar la app."
+        )
+    return value
+
+
+SECRET_KEY = _require_secret("SECRET_KEY")
 ALGORITHM = os.getenv("ALGORITHM", "HS256")
 SECRET_NCON = int(os.getenv("SECRET_NCON", "9997"))
-PASSWORD = os.getenv("ADMIN_PASSWORD", "change-me-in-production")
-API_KEY = os.getenv("API_KEY", "change-me-in-production")
-PDF_DIR = Path(os.getenv("PDF_DIR", "app/static/pdfs"))
-IMPORTES_FILE = Path(os.getenv("IMPORTES_FILE", "app/static/montos/payments.json"))
+PASSWORD = _require_secret("ADMIN_PASSWORD")
+API_KEY = _require_secret("API_KEY")
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 STATIC_DIR = os.path.join(BASE_DIR, "static")
+# Solo se sirve publicamente la carpeta de imagenes. Las boletas (pdfs/) y los
+# montos (montos/payments.json) viven dentro de static/ pero NO se montan: las
+# boletas solo se entregan via /download-pdf con token del socio.
+IMAGES_DIR = os.path.join(STATIC_DIR, "images")
 # ----------------------------
 # APP INITIALIZATION & MIDDLEWARE
 # ----------------------------
@@ -63,7 +81,6 @@ allow_origins_env = os.getenv("ALLOW_ORIGINS", "")
 allow_origin_regex_env = os.getenv("ALLOW_ORIGIN_REGEX", "")
 if allow_origins_env:
     allow_origins = [o.strip() for o in allow_origins_env.split(",") if o.strip()]
-    print(allow_origins)
 else:
     allow_origins = []
 
@@ -93,8 +110,8 @@ else:
         allow_headers=["*"],
     )
 
-os.makedirs(STATIC_DIR, exist_ok=True)
-app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+os.makedirs(IMAGES_DIR, exist_ok=True)
+app.mount("/static/images", StaticFiles(directory=IMAGES_DIR), name="static-images")
 
 @app.get("/ping")
 def ping():
@@ -139,13 +156,10 @@ class ConsumoInsert(BaseModel):
 class UpdateDniParams(BaseModel):
     """DNI update request for a socio."""
     ncon: int = Field(..., gt=0, description="Numero de conexion (ncon)")
-    dni: int = Field(..., min_length=7, max_length=9, description="DNI nuevo")
-
-    @validator("dni")
-    def solo_digitos(cls, v: str):
-        if not v.isdigit():
-            raise ValueError("Debe contener solo digitos")
-        return v
+    dni: int = Field(
+        ..., ge=1_000_000, le=999_999_999,
+        description="DNI nuevo (7 a 9 digitos)"
+    )
 
 
 class SocioCreate(BaseModel):
@@ -250,7 +264,10 @@ def decode_token(token):
             status_code=401, detail="Invalid or expired token") from exc
 
 
-security = HTTPBearer()
+# tokenUrl apunta al endpoint /token: hace que el boton "Authorize" de los docs
+# tenga un formulario de login. En runtime solo lee "Authorization: Bearer <token>",
+# igual que antes, asi que el frontend no cambia.
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 
 def verify_api_key(x_api_key: str = Header(..., alias="x-api-key")):
     """Verify API key from base server."""
@@ -259,17 +276,17 @@ def verify_api_key(x_api_key: str = Header(..., alias="x-api-key")):
     return True
 
 
-def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
+def get_current_user(token: str = Depends(oauth2_scheme)):
     """
     Extract and validate JWT token from Authorization header (Bearer token).
     Compatible with frontend storing token in localStorage and sending it as:
     Authorization: Bearer <token>
     Returns the user's ncon (connection number) if valid.
     """
-    token = decode_token(credentials.credentials)
+    payload = decode_token(token)
 
-    sub = token.get("sub")
-    role = token.get("role")
+    sub = payload.get("sub")
+    role = payload.get("role")
 
     if not sub or not role:
         raise HTTPException(status_code=401, detail="Invalid token")
@@ -304,34 +321,77 @@ def create_token(ncon, is_admin=False):
     return token
 
 
+@app.post("/token", include_in_schema=False)
+def token_login(form_data: OAuth2PasswordRequestForm = Depends()):
+    """
+    Login para el boton 'Authorize' de los docs (flujo OAuth2 password).
+    - password = contraseña de admin  -> token de admin
+    - username = un ncon valido        -> token de ese socio
+    El frontend NO usa este endpoint; sigue con /login y /admin-login.
+    """
+    # Admin: alcanza con la contraseña correcta.
+    if form_data.password and form_data.password == PASSWORD:
+        return {"access_token": create_token(SECRET_NCON, True), "token_type": "bearer"}
+
+    # Socio: username = ncon existente.
+    if form_data.username.isdigit():
+        with db_conn() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    "SELECT ncon FROM socios WHERE ncon = %s",
+                    (int(form_data.username),),
+                )
+                if cursor.fetchone():
+                    return {
+                        "access_token": create_token(int(form_data.username)),
+                        "token_type": "bearer",
+                    }
+
+    raise HTTPException(status_code=401, detail="Credenciales invalidas")
+
+
 # - - - - - - - - - - - - - - - -
 # USER ENDPOINTS
 # - - - - - - - - - - - - - - - -
 
 @app.get("/download-pdf")
 def download_user_pdf(current_user: dict = Depends(get_current_user)):
-    if current_user is None:
-        raise HTTPException(status_code=401, detail="Not authenticated")
-    
     ncon = current_user["ncon"]
-    filename = f"ncon_{ncon}.pdf"
-    file_path = PDF_DIR / filename
-    
-    if not file_path.is_file():
+
+    # Buscar el periodo mas reciente con boleta para este socio.
+    with db_conn() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "SELECT periodo, sector, pagina FROM boletas "
+                "WHERE ncon = %s ORDER BY periodo DESC LIMIT 1",
+                (ncon,),
+            )
+            row = cursor.fetchone()
+
+    if not row:
         raise HTTPException(
             status_code=404,
-            detail=f"PDF not found for user {current_user['ncon']} (expected: {filename})"
+            detail=f"No hay boleta disponible para el socio {ncon}",
         )
-    
-    return FileResponse(
-        path=str(file_path),
+
+    periodo, sector, pagina = row
+    try:
+        pdf_bytes = boletas_processor.extract_boleta_pdf(periodo, sector, pagina)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error obteniendo la boleta: {e}",
+        ) from e
+
+    return Response(
+        content=pdf_bytes,
         media_type="application/pdf",
-        filename=f"boleta_{ncon}.pdf",
         headers={
+            "Content-Disposition": f'attachment; filename="boleta_{ncon}.pdf"',
             "Cache-Control": "no-cache, no-store, must-revalidate",
             "Pragma": "no-cache",
-            "Expires": "0"
-        }
+            "Expires": "0",
+        },
     )
 
 @app.post("/login")
@@ -367,50 +427,20 @@ def log_in(data: LoginCreate):
 
 @app.get("/importe")
 def get_importe(current_user: dict = Depends(get_current_user)):
-    ncon = str(current_user["ncon"])
-    try:
-        with open(IMPORTES_FILE, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-        
-        # Get the payments for this specific user
-        user_payments = data['payments'].get(ncon, [])
-        
-        # If no payments found, return 0 or appropriate message
-        if not user_payments:
-            return {"importe": 0, "message": "No payments found for this user"}
-        
-        # Get the latest payment amount
-        latest_payment = user_payments[-1]  # Most recent payment
-        amount = latest_payment.get('amount_numeric', 0)
-        
-        return {"importe": float(amount)}
-        
-    except FileNotFoundError:
-        return {"importe": 0, "message": "Payments file not found"}
-    except KeyError as e:
-        return {"importe": 0, "message": f"Invalid data structure: {e}"}
-    except Exception as e:
-        return {"error": str(e)}
+    """Importe de la boleta mas reciente del socio (tabla boletas)."""
+    ncon = current_user["ncon"]
+    with db_conn() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "SELECT importe FROM boletas "
+                "WHERE ncon = %s ORDER BY periodo DESC LIMIT 1",
+                (ncon,),
+            )
+            row = cursor.fetchone()
 
-    # rows = fetch_rangos()
-
-    # rangos = {}
-    # for rango, importe in rows:
-    #     rangos[rango] = importe
-
-    # print(rangos)
-
-    # rows = fetch_consumos(ncon, limit=2)
-
-    # if not rows:
-    #     raise HTTPException(404, "Usuario no encontrado")
-
-    # consumo_actual = rows[0][0]
-    # consumo_pasado = rows[1][0]
-    # consumo = consumo_actual - consumo_pasado
-
-    # importe = calcular_importe(consumo, rangos)
-    # return importe
+    if not row or row[0] is None:
+        return {"importe": 0, "message": "No hay importe para este socio"}
+    return {"importe": float(row[0])}
 
 
 @app.get("/medidor")
@@ -509,77 +539,6 @@ def get_last_consumos_date(current_user: dict = Depends(get_current_user), limit
         else:
             raise HTTPException(
                 status_code=404, detail="Usuario no encontrado")
-
-
-def init_test():
-    """Helper function: create consumos table if it doesn't exist."""
-
-    cursor = None
-    with db_conn() as conn:
-        cursor = conn.cursor()
-        try:
-            cursor.execute("""
-            SHOW search_path;
-            """)
-        except Exception as e:
-            return f"Error : {e}"
-        finally:
-            if cursor:
-                cursor.close()
-            conn.commit()
-
-
-@app.get("/debug-conexion")
-def debug_conexion():
-    """Debug endpoint: return database info, search path, and table statistics."""
-    cursor = None
-    with db_conn() as conn:
-        cursor = conn.cursor()
-        try:
-            cursor.execute(
-                "SELECT current_database(), current_user, version()")
-            db_info = cursor.fetchone()
-
-            cursor.execute("SHOW search_path")
-            search_path = cursor.fetchone()[0]
-
-            cursor.execute("""
-                SELECT
-                    table_catalog,
-                    table_schema,
-                    table_name,
-                    table_type
-                FROM information_schema.tables
-                WHERE table_name LIKE '%socio%'
-                ORDER BY table_schema, table_name
-            """)
-            tablas_socio = cursor.fetchall()
-
-            todas_tablas = []
-            for _, schema, tabla, _ in tablas_socio:
-                cursor.execute(f"""
-                    SELECT COUNT(*) as count,
-                           COALESCE(MAX(id_socio), 0) as max_id
-                    FROM {schema}.{tabla}
-                """)
-                stats = cursor.fetchone()
-                todas_tablas.append({
-                    "schema": schema,
-                    "tabla": tabla,
-                    "registros": stats[0],
-                    "max_id": stats[1]
-                })
-
-            return {
-                "base_datos_actual": db_info[0],
-                "usuario": db_info[1],
-                "search_path": search_path,
-                "tablas_socio_encontradas": tablas_socio,
-                "estadisticas_tablas": todas_tablas
-            }
-        finally:
-            if cursor:
-                cursor.close()
 
 
 # - - - - - - - - - - - - - - - -
@@ -817,4 +776,75 @@ def list_ncon_with_empty_dni(userdata: dict = Depends(get_current_user)):
         finally:
             if cursor:
                 cursor.close()
+
+
+# - - - - - - - - - - - - - - - -
+# BOLETAS (procesamiento mensual desde el frontend)
+# - - - - - - - - - - - - - - - -
+
+PERIODO_RE = re.compile(r"^\d{4}-\d{2}$")
+
+
+@app.post("/boletas/upload")
+async def upload_boletas(
+    background_tasks: BackgroundTasks,
+    periodo: str = Form(..., description="Periodo de las boletas (YYYY-MM)"),
+    files: list[UploadFile] = File(..., description="PDFs de sector"),
+    userdata: dict = Depends(get_current_user),
+):
+    """
+    Recibe los PDFs de sector, los procesa en background (sube a R2 + registra
+    cada boleta en la BD) y devuelve un job_id para seguir el progreso.
+    """
+    check_admin(userdata["role"])
+
+    if not PERIODO_RE.match(periodo):
+        raise HTTPException(
+            status_code=400, detail="periodo debe tener formato YYYY-MM")
+
+    sector_files: dict[str, bytes] = {}
+    for f in files:
+        data = await f.read()
+        if not data:
+            continue
+        if not (f.filename or "").lower().endswith(".pdf"):
+            raise HTTPException(
+                status_code=400,
+                detail=f"'{f.filename}' no es un PDF")
+        sector = Path(f.filename).stem
+        sector_files[sector] = data
+
+    if not sector_files:
+        raise HTTPException(status_code=400, detail="No se recibieron PDFs")
+
+    job_id = str(uuid.uuid4())
+    boletas_processor.create_job(job_id, periodo)
+    background_tasks.add_task(
+        boletas_processor.process_period, job_id, periodo, sector_files)
+
+    return {
+        "job_id": job_id,
+        "estado": "procesando",
+        "periodo": periodo,
+        "sectores": list(sector_files.keys()),
+    }
+
+
+@app.get("/boletas/status/{job_id}")
+def boletas_status(job_id: str, userdata: dict = Depends(get_current_user)):
+    """Progreso de un job de procesamiento de boletas."""
+    check_admin(userdata["role"])
+
+    row = boletas_processor.get_job(job_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Job no encontrado")
+
+    return {
+        "job_id": str(row[0]),
+        "periodo": row[1],
+        "estado": row[2],
+        "total": row[3],
+        "procesadas": row[4],
+        "error": row[5],
+    }
 

@@ -1,2 +1,20 @@
-  *:Zone.Identifier
-  *.pdf:Zone.Identifier
+# Secrets / entorno
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# Cache local de boletas (PDFs de sector descargados de R2)
+.cache/
+boletas_cache/
+
+# Windows Zone.Identifier
+*:Zone.Identifier
+*.pdf:Zone.Identifier
