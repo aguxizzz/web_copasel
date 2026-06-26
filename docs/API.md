@@ -51,7 +51,12 @@ Datos del socio (número de medidor, nombre, últimos consumos).
 ## Boletas — carga mensual (token de admin)
 
 Flujo: el trabajador sube los PDFs de sector → el backend procesa en background
-→ el front consulta el estado hasta que termina.
+→ el front consulta el estado hasta que termina → el admin **publica** el período.
+
+> Importante: un período recién subido queda como **borrador** (`publicado: false`)
+> y los socios NO lo ven todavía. Recién cuando el admin lo publica, `/download-pdf`
+> e `/importe` empiezan a servir ese mes. Así una subida de prueba o a medias nunca
+> tapa al período en vivo. Los socios siempre ven el último período **publicado**.
 
 ### `POST /boletas/upload`
 `multipart/form-data`:
@@ -110,6 +115,33 @@ async function esperarFin(jobId, adminToken) {
   }
 }
 ```
+
+### `GET /boletas/periodos`
+Lista los períodos con su estado, para que el admin vea cuál publicar.
+```json
+[
+  { "periodo": "2026-06", "publicado": false, "publicado_at": null, "boletas": 1289 },
+  { "periodo": "2026-05", "publicado": true,  "publicado_at": "2026-06-01 12:00:00+00", "boletas": 1289 }
+]
+```
+
+### `POST /boletas/publish`
+Publica un período: a partir de ahí los socios ven sus boletas de ese mes.
+```json
+{ "periodo": "2026-06" }
+```
+Respuesta: `{ "periodo": "2026-06", "publicado": true }`. 404 si el período no
+existe (no se procesó ninguna subida para él).
+
+### `POST /boletas/unpublish`
+Despublica un período (rollback): deja de servirse a los socios.
+```json
+{ "periodo": "2026-06" }
+```
+
+> Flujo completo del mes: `upload` → pollear `status` hasta `listo` →
+> (opcional) verificar → `publish`. Para corregir un error: `unpublish`,
+> volver a `upload`, `publish`.
 
 ---
 

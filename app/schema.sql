@@ -29,3 +29,26 @@ CREATE TABLE IF NOT EXISTS boleta_jobs (
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- Estado de publicación por periodo. /download-pdf y /importe solo sirven el
+-- ultimo periodo con publicado = TRUE, asi una subida de prueba o a medias
+-- nunca tapa al periodo en vivo. Publicar es una accion explicita del admin.
+CREATE TABLE IF NOT EXISTS boleta_periodos (
+    periodo      TEXT        PRIMARY KEY,
+    publicado    BOOLEAN     NOT NULL DEFAULT FALSE,
+    publicado_at TIMESTAMPTZ,
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- Backfill idempotente: registrar los periodos que ya existen en boletas.
+INSERT INTO boleta_periodos (periodo)
+SELECT DISTINCT periodo FROM boletas
+ON CONFLICT (periodo) DO NOTHING;
+
+-- Bootstrap unico: si todavia no hay ningun periodo publicado, publicar el mas
+-- reciente (los datos actuales se asumen consistentes en la migracion). Una vez
+-- que exista al menos un publicado, esta sentencia no hace nada.
+UPDATE boleta_periodos
+SET publicado = TRUE, publicado_at = now()
+WHERE periodo = (SELECT MAX(periodo) FROM boleta_periodos)
+  AND NOT EXISTS (SELECT 1 FROM boleta_periodos WHERE publicado);

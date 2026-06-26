@@ -162,6 +162,11 @@ class UpdateDniParams(BaseModel):
     )
 
 
+class PeriodoPublish(BaseModel):
+    """Publicar/despublicar un periodo de boletas."""
+    periodo: str = Field(..., description="Periodo a publicar (YYYY-MM)")
+
+
 class SocioCreate(BaseModel):
     """Socio creation request from base server."""
     ncon: int = Field(..., gt=0, description="Numero de conexion (ncon)")
@@ -358,12 +363,14 @@ def token_login(form_data: OAuth2PasswordRequestForm = Depends()):
 def download_user_pdf(current_user: dict = Depends(get_current_user)):
     ncon = current_user["ncon"]
 
-    # Buscar el periodo mas reciente con boleta para este socio.
+    # Periodo PUBLICADO mas reciente con boleta para este socio.
     with db_conn() as conn:
         with conn.cursor() as cursor:
             cursor.execute(
-                "SELECT periodo, sector, pagina FROM boletas "
-                "WHERE ncon = %s ORDER BY periodo DESC LIMIT 1",
+                "SELECT b.periodo, b.sector, b.pagina FROM boletas b "
+                "JOIN boleta_periodos p ON p.periodo = b.periodo "
+                "WHERE b.ncon = %s AND p.publicado "
+                "ORDER BY b.periodo DESC LIMIT 1",
                 (ncon,),
             )
             row = cursor.fetchone()
@@ -432,8 +439,10 @@ def get_importe(current_user: dict = Depends(get_current_user)):
     with db_conn() as conn:
         with conn.cursor() as cursor:
             cursor.execute(
-                "SELECT importe FROM boletas "
-                "WHERE ncon = %s ORDER BY periodo DESC LIMIT 1",
+                "SELECT b.importe FROM boletas b "
+                "JOIN boleta_periodos p ON p.periodo = b.periodo "
+                "WHERE b.ncon = %s AND p.publicado "
+                "ORDER BY b.periodo DESC LIMIT 1",
                 (ncon,),
             )
             row = cursor.fetchone()
@@ -847,4 +856,44 @@ def boletas_status(job_id: str, userdata: dict = Depends(get_current_user)):
         "procesadas": row[4],
         "error": row[5],
     }
+
+
+@app.get("/boletas/periodos")
+def boletas_periodos(userdata: dict = Depends(get_current_user)):
+    """Lista de periodos con su estado de publicacion y cantidad de boletas."""
+    check_admin(userdata["role"])
+    rows = boletas_processor.listar_periodos()
+    return [
+        {
+            "periodo": r[0],
+            "publicado": r[1],
+            "publicado_at": str(r[2]) if r[2] else None,
+            "boletas": r[3],
+        }
+        for r in rows
+    ]
+
+
+@app.post("/boletas/publish")
+def boletas_publish(data: PeriodoPublish, userdata: dict = Depends(get_current_user)):
+    """Publica un periodo: a partir de ahi los socios ven sus boletas de ese mes."""
+    check_admin(userdata["role"])
+    if not PERIODO_RE.match(data.periodo):
+        raise HTTPException(status_code=400, detail="periodo debe tener formato YYYY-MM")
+    if not boletas_processor.publicar_periodo(data.periodo):
+        raise HTTPException(
+            status_code=404,
+            detail="Periodo no encontrado (¿se proceso la subida?)")
+    return {"periodo": data.periodo, "publicado": True}
+
+
+@app.post("/boletas/unpublish")
+def boletas_unpublish(data: PeriodoPublish, userdata: dict = Depends(get_current_user)):
+    """Despublica un periodo (rollback): deja de servirse a los socios."""
+    check_admin(userdata["role"])
+    if not PERIODO_RE.match(data.periodo):
+        raise HTTPException(status_code=400, detail="periodo debe tener formato YYYY-MM")
+    if not boletas_processor.despublicar_periodo(data.periodo):
+        raise HTTPException(status_code=404, detail="Periodo no encontrado")
+    return {"periodo": data.periodo, "publicado": False}
 

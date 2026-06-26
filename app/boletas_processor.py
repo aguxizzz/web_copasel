@@ -99,6 +99,60 @@ def get_job(job_id: str):
 # Persistencia de boletas
 # ---------------------------------------------------------------------------
 
+def _ensure_periodo(periodo: str) -> None:
+    """Registra el periodo (como NO publicado) si no existe. Preserva el estado
+    de publicacion si ya estaba, para no despublicar al re-procesar."""
+    with db_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO boleta_periodos (periodo) VALUES (%s) "
+                "ON CONFLICT (periodo) DO NOTHING",
+                (periodo,),
+            )
+        conn.commit()
+
+
+def publicar_periodo(periodo: str) -> bool:
+    with db_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE boleta_periodos SET publicado = TRUE, publicado_at = now() "
+                "WHERE periodo = %s",
+                (periodo,),
+            )
+            updated = cur.rowcount
+        conn.commit()
+    return updated > 0
+
+
+def despublicar_periodo(periodo: str) -> bool:
+    with db_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE boleta_periodos SET publicado = FALSE, publicado_at = NULL "
+                "WHERE periodo = %s",
+                (periodo,),
+            )
+            updated = cur.rowcount
+        conn.commit()
+    return updated > 0
+
+
+def listar_periodos():
+    with db_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT p.periodo, p.publicado, p.publicado_at, COUNT(b.ncon) AS boletas
+                FROM boleta_periodos p
+                LEFT JOIN boletas b ON b.periodo = p.periodo
+                GROUP BY p.periodo, p.publicado, p.publicado_at
+                ORDER BY p.periodo DESC
+                """
+            )
+            return cur.fetchall()
+
+
 def _upsert_boletas(rows) -> None:
     if not rows:
         return
@@ -154,6 +208,7 @@ def process_period(job_id: str, periodo: str, sector_files: dict) -> None:
             pdf.close()
 
         _upsert_boletas(rows)
+        _ensure_periodo(periodo)  # queda como borrador hasta que el admin publique
         _update_job(job_id, procesadas=procesadas, estado="listo")
     except Exception as e:  # noqa: BLE001 - se registra en el job para el front
         _update_job(job_id, estado="error", error=str(e))
