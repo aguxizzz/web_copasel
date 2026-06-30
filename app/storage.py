@@ -46,7 +46,13 @@ def _get_client():
             aws_access_key_id=R2_ACCESS_KEY,
             aws_secret_access_key=R2_SECRET_KEY,
             region_name="auto",
-            config=Config(signature_version="s3v4"),
+            config=Config(
+                signature_version="s3v4",
+                # Sin esto, un cuelgue de red deja el job colgado para siempre.
+                connect_timeout=15,
+                read_timeout=60,
+                retries={"max_attempts": 3, "mode": "standard"},
+            ),
         )
     return _client
 
