@@ -181,33 +181,42 @@ def process_period(job_id: str, periodo: str, sector_files: dict) -> None:
     """
     sector_files: dict[sector_name -> bytes del PDF].
     Sube cada PDF de sector a R2 y registra la boleta de cada socio.
+
+    Procesa un sector a la vez y libera su memoria al terminar para no
+    quedarse sin RAM: nunca mantiene mas de un PDF abierto, y vacia el cache
+    de layout de pdfplumber pagina por pagina (`page.flush_cache()`).
     """
     try:
-        # Abrir todos los PDFs y contar páginas para el progreso.
-        opened = {}
+        # Conteo total de paginas para el progreso, liviano (pypdf no cachea
+        # el layout como pdfplumber).
         total = 0
-        for sector, data in sector_files.items():
-            pdf = pdfplumber.open(io.BytesIO(data))
-            opened[sector] = (data, pdf)
-            total += len(pdf.pages)
+        for data in sector_files.values():
+            total += len(PdfReader(io.BytesIO(data)).pages)
         _update_job(job_id, total=total)
 
-        rows = []
         procesadas = 0
-        for sector, (data, pdf) in opened.items():
+        for sector in list(sector_files.keys()):
+            data = sector_files.pop(sector)  # sacar del dict para liberarlo al avanzar
+
             # Persistir el PDF de sector en R2 (privado).
             storage.upload_sector_pdf(periodo, sector, data)
-            for i, page in enumerate(pdf.pages, start=1):
-                text = page.extract_text() or ""
-                ncon = _extract_ncon(text)
-                if ncon is not None:
-                    rows.append((ncon, periodo, sector, i, _extract_importe(text)))
-                procesadas += 1
-                if procesadas % 25 == 0:
-                    _update_job(job_id, procesadas=procesadas)
-            pdf.close()
 
-        _upsert_boletas(rows)
+            rows = []
+            with pdfplumber.open(io.BytesIO(data)) as pdf:
+                for i, page in enumerate(pdf.pages, start=1):
+                    text = page.extract_text() or ""
+                    ncon = _extract_ncon(text)
+                    if ncon is not None:
+                        rows.append((ncon, periodo, sector, i, _extract_importe(text)))
+                    page.flush_cache()  # libera el layout cacheado de esta pagina
+                    procesadas += 1
+                    if procesadas % 25 == 0:
+                        _update_job(job_id, procesadas=procesadas)
+
+            # Persistir por sector (no acumular todas las filas hasta el final).
+            _upsert_boletas(rows)
+            del data, rows  # liberar la memoria del sector antes del siguiente
+
         _ensure_periodo(periodo)  # queda como borrador hasta que el admin publique
         _update_job(job_id, procesadas=procesadas, estado="listo")
     except Exception as e:  # noqa: BLE001 - se registra en el job para el front
