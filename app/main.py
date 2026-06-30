@@ -17,6 +17,8 @@ from typing import Optional
 from fastapi.middleware.cors import CORSMiddleware
 import os
 import re
+import shutil
+import tempfile
 import uuid
 from pathlib import Path
 from dotenv import load_dotenv
@@ -811,31 +813,42 @@ async def upload_boletas(
         raise HTTPException(
             status_code=400, detail="periodo debe tener formato YYYY-MM")
 
-    sector_files: dict[str, bytes] = {}
-    for f in files:
-        data = await f.read()
-        if not data:
-            continue
-        if not (f.filename or "").lower().endswith(".pdf"):
-            raise HTTPException(
-                status_code=400,
-                detail=f"'{f.filename}' no es un PDF")
-        sector = Path(f.filename).stem
-        sector_files[sector] = data
+    # Volcar cada PDF a disco en chunks (sin cargar el archivo entero en RAM)
+    # y procesarlos despues desde ahi: en 512MB no entran todos los PDFs juntos.
+    job_id = str(uuid.uuid4())
+    tmp_dir = Path(tempfile.mkdtemp(prefix=f"boletas_{job_id}_"))
+    sector_paths: dict[str, str] = {}
+    try:
+        for f in files:
+            if not (f.filename or "").lower().endswith(".pdf"):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"'{f.filename}' no es un PDF")
+            sector = Path(f.filename).stem
+            dest = tmp_dir / f"{sector}.pdf"
+            with open(dest, "wb") as out:
+                shutil.copyfileobj(f.file, out, length=1024 * 1024)
+            if dest.stat().st_size == 0:
+                dest.unlink()
+                continue
+            sector_paths[sector] = str(dest)
+    except HTTPException:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        raise
 
-    if not sector_files:
+    if not sector_paths:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
         raise HTTPException(status_code=400, detail="No se recibieron PDFs")
 
-    job_id = str(uuid.uuid4())
     boletas_processor.create_job(job_id, periodo)
     background_tasks.add_task(
-        boletas_processor.process_period, job_id, periodo, sector_files)
+        boletas_processor.process_period, job_id, periodo, sector_paths, str(tmp_dir))
 
     return {
         "job_id": job_id,
         "estado": "procesando",
         "periodo": periodo,
-        "sectores": list(sector_files.keys()),
+        "sectores": list(sector_paths.keys()),
     }
 
 

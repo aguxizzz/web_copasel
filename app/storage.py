@@ -65,6 +65,19 @@ def upload_sector_pdf(periodo: str, sector: str, data: bytes) -> None:
     )
 
 
+def upload_sector_pdf_file(periodo: str, sector: str, path) -> None:
+    """
+    Sube el PDF de un sector desde un archivo en disco, sin cargar los bytes en
+    RAM (transferencia administrada de boto3, multipart y con bajo uso de memoria).
+    """
+    _get_client().upload_file(
+        str(path),
+        R2_BUCKET,
+        _sector_key(periodo, sector),
+        ExtraArgs={"ContentType": "application/pdf"},
+    )
+
+
 def get_sector_pdf_path(periodo: str, sector: str) -> Path:
     """
     Ruta local al PDF de sector, descargándolo de R2 a la cache si no está.

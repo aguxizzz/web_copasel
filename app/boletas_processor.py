@@ -9,7 +9,9 @@ Pensado para correr en background (FastAPI BackgroundTasks): las funciones son
 síncronas y Starlette las ejecuta en el threadpool, sin bloquear el event loop.
 """
 import io
+import os
 import re
+import shutil
 
 import pdfplumber
 from pypdf import PdfReader, PdfWriter
@@ -177,32 +179,36 @@ def _upsert_boletas(rows) -> None:
 # Proceso principal (corre en background)
 # ---------------------------------------------------------------------------
 
-def process_period(job_id: str, periodo: str, sector_files: dict) -> None:
+def process_period(
+    job_id: str, periodo: str, sector_paths: dict, tmp_dir: str | None = None
+) -> None:
     """
-    sector_files: dict[sector_name -> bytes del PDF].
-    Sube cada PDF de sector a R2 y registra la boleta de cada socio.
+    sector_paths: dict[sector_name -> ruta del PDF en disco].
 
-    Procesa un sector a la vez y libera su memoria al terminar para no
-    quedarse sin RAM: nunca mantiene mas de un PDF abierto, y vacia el cache
-    de layout de pdfplumber pagina por pagina (`page.flush_cache()`).
+    Sube cada PDF de sector a R2 y registra la boleta de cada socio. Esta
+    pensado para correr en 512MB de RAM: los PDFs nunca se cargan enteros en
+    memoria. Procesa un sector a la vez leyendo de disco, sube a R2 por
+    streaming, vacia el cache de pdfplumber pagina por pagina
+    (`page.flush_cache()`) y borra cada temporal al terminar.
     """
     try:
         # Conteo total de paginas para el progreso, liviano (pypdf no cachea
         # el layout como pdfplumber).
         total = 0
-        for data in sector_files.values():
-            total += len(PdfReader(io.BytesIO(data)).pages)
+        for path in sector_paths.values():
+            with open(path, "rb") as fh:
+                total += len(PdfReader(fh).pages)
         _update_job(job_id, total=total)
 
         procesadas = 0
-        for sector in list(sector_files.keys()):
-            data = sector_files.pop(sector)  # sacar del dict para liberarlo al avanzar
+        for sector in list(sector_paths.keys()):
+            path = sector_paths.pop(sector)
 
-            # Persistir el PDF de sector en R2 (privado).
-            storage.upload_sector_pdf(periodo, sector, data)
+            # Persistir el PDF de sector en R2 (privado), por streaming.
+            storage.upload_sector_pdf_file(periodo, sector, path)
 
             rows = []
-            with pdfplumber.open(io.BytesIO(data)) as pdf:
+            with pdfplumber.open(path) as pdf:
                 for i, page in enumerate(pdf.pages, start=1):
                     text = page.extract_text() or ""
                     ncon = _extract_ncon(text)
@@ -215,9 +221,13 @@ def process_period(job_id: str, periodo: str, sector_files: dict) -> None:
 
             # Persistir por sector (no acumular todas las filas hasta el final).
             _upsert_boletas(rows)
-            del data, rows  # liberar la memoria del sector antes del siguiente
+            os.remove(path)  # liberar el disco del sector ya procesado
+            del rows
 
         _ensure_periodo(periodo)  # queda como borrador hasta que el admin publique
         _update_job(job_id, procesadas=procesadas, estado="listo")
     except Exception as e:  # noqa: BLE001 - se registra en el job para el front
         _update_job(job_id, estado="error", error=str(e))
+    finally:
+        if tmp_dir:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
