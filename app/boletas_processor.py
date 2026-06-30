@@ -8,19 +8,16 @@ página. El avance se refleja en `boleta_jobs` para que el front haga polling.
 Pensado para correr en background (FastAPI BackgroundTasks): las funciones son
 síncronas y Starlette las ejecuta en el threadpool, sin bloquear el event loop.
 """
+import gc
 import io
-import logging
 import os
 import re
 import shutil
 
-import pdfplumber
 from pypdf import PdfReader, PdfWriter
 
 from app import storage
 from app.database import db_conn
-
-log = logging.getLogger("boletas")
 
 # Mismos patrones que el script original.
 AMOUNT_RE = re.compile(r"\$([0-9,]+\.[0-9]{2})")
@@ -190,56 +187,45 @@ def process_period(
 
     Sube cada PDF de sector a R2 y registra la boleta de cada socio. Esta
     pensado para correr en 512MB de RAM: los PDFs nunca se cargan enteros en
-    memoria. Procesa un sector a la vez leyendo de disco, sube a R2 por
-    streaming, vacia el cache de pdfplumber pagina por pagina
-    (`page.flush_cache()`) y borra cada temporal al terminar.
+    memoria. Procesa un sector a la vez leyendo de disco con pypdf (mucho mas
+    liviano que pdfplumber/pdfminer), sube a R2 por streaming y borra cada
+    temporal al terminar.
     """
-    log.info("[boletas %s] inicio periodo=%s sectores=%s",
-             job_id, periodo, list(sector_paths.keys()))
     try:
-        # Conteo total de paginas para el progreso, liviano (pypdf no cachea
-        # el layout como pdfplumber).
+        # Conteo total de paginas para el progreso.
         total = 0
         for path in sector_paths.values():
             with open(path, "rb") as fh:
                 total += len(PdfReader(fh).pages)
         _update_job(job_id, total=total)
-        log.info("[boletas %s] total paginas=%s", job_id, total)
 
         procesadas = 0
         for sector in list(sector_paths.keys()):
             path = sector_paths.pop(sector)
 
             # Persistir el PDF de sector en R2 (privado), por streaming.
-            log.info("[boletas %s] sector=%s -> subiendo a R2", job_id, sector)
             storage.upload_sector_pdf_file(periodo, sector, path)
-            log.info("[boletas %s] sector=%s subido, extrayendo paginas", job_id, sector)
 
             rows = []
-            with pdfplumber.open(path) as pdf:
-                for i, page in enumerate(pdf.pages, start=1):
-                    text = page.extract_text() or ""
-                    ncon = _extract_ncon(text)
-                    if ncon is not None:
-                        rows.append((ncon, periodo, sector, i, _extract_importe(text)))
-                    page.flush_cache()  # libera el layout cacheado de esta pagina
-                    procesadas += 1
-                    if procesadas % 10 == 0:
-                        _update_job(job_id, procesadas=procesadas)
-                        log.info("[boletas %s] sector=%s pagina=%s (procesadas=%s/%s)",
-                                 job_id, sector, i, procesadas, total)
+            reader = PdfReader(path)
+            for i, page in enumerate(reader.pages, start=1):
+                text = page.extract_text() or ""
+                ncon = _extract_ncon(text)
+                if ncon is not None:
+                    rows.append((ncon, periodo, sector, i, _extract_importe(text)))
+                procesadas += 1
+                if procesadas % 25 == 0:
+                    _update_job(job_id, procesadas=procesadas)
 
             # Persistir por sector (no acumular todas las filas hasta el final).
             _upsert_boletas(rows)
+            del reader, rows
             os.remove(path)  # liberar el disco del sector ya procesado
-            log.info("[boletas %s] sector=%s LISTO (%s boletas)", job_id, sector, len(rows))
-            del rows
+            gc.collect()  # devolver la memoria del sector antes del siguiente
 
         _ensure_periodo(periodo)  # queda como borrador hasta que el admin publique
         _update_job(job_id, procesadas=procesadas, estado="listo")
-        log.info("[boletas %s] FIN ok procesadas=%s", job_id, procesadas)
     except Exception as e:  # noqa: BLE001 - se registra en el job para el front
-        log.exception("[boletas %s] ERROR: %s", job_id, e)
         _update_job(job_id, estado="error", error=str(e))
     finally:
         if tmp_dir:

@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 
 import boto3
+from boto3.s3.transfer import TransferConfig
 from botocore.config import Config
 
 R2_ENDPOINT = os.getenv("R2_ENDPOINT")
@@ -46,13 +47,7 @@ def _get_client():
             aws_access_key_id=R2_ACCESS_KEY,
             aws_secret_access_key=R2_SECRET_KEY,
             region_name="auto",
-            config=Config(
-                signature_version="s3v4",
-                # Sin esto, un cuelgue de red deja el job colgado para siempre.
-                connect_timeout=15,
-                read_timeout=60,
-                retries={"max_attempts": 3, "mode": "standard"},
-            ),
+            config=Config(signature_version="s3v4"),
         )
     return _client
 
@@ -71,16 +66,28 @@ def upload_sector_pdf(periodo: str, sector: str, data: bytes) -> None:
     )
 
 
+# Sin concurrencia y en partes chicas: el upload a R2 no debe buffear mas de
+# ~5MB a la vez (el default de boto3 son 10 partes de 8MB en paralelo = ~80MB).
+_TRANSFER_CONFIG = TransferConfig(
+    multipart_threshold=8 * 1024 * 1024,
+    multipart_chunksize=5 * 1024 * 1024,
+    max_concurrency=1,
+    use_threads=False,
+)
+
+
 def upload_sector_pdf_file(periodo: str, sector: str, path) -> None:
     """
     Sube el PDF de un sector desde un archivo en disco, sin cargar los bytes en
-    RAM (transferencia administrada de boto3, multipart y con bajo uso de memoria).
+    RAM (transferencia administrada de boto3, con concurrencia limitada para
+    acotar el pico de memoria).
     """
     _get_client().upload_file(
         str(path),
         R2_BUCKET,
         _sector_key(periodo, sector),
         ExtraArgs={"ContentType": "application/pdf"},
+        Config=_TRANSFER_CONFIG,
     )
 
 

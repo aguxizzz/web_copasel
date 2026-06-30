@@ -21,5 +21,4 @@ pydantic[email]
 python-dotenv>=1.0.0
 python-multipart>=0.0.9
 boto3>=1.34
-pdfplumber>=0.11
 pypdf>=4.0
