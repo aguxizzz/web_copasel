@@ -20,7 +20,9 @@ R2_BUCKET = os.getenv("R2_BUCKET")
 R2_ACCESS_KEY = os.getenv("R2_ACCESS_KEY")
 R2_SECRET_KEY = os.getenv("R2_SECRET_KEY")
 
-CACHE_DIR = Path(os.getenv("BOLETAS_CACHE_DIR", ".cache/boletas"))
+# En Vercel el filesystem es de solo lectura salvo /tmp.
+_DEFAULT_CACHE_DIR = "/tmp/boletas-cache" if os.getenv("VERCEL") else ".cache/boletas"
+CACHE_DIR = Path(os.getenv("BOLETAS_CACHE_DIR", _DEFAULT_CACHE_DIR))
 
 _client = None
 

@@ -112,8 +112,14 @@ else:
         allow_headers=["*"],
     )
 
-os.makedirs(IMAGES_DIR, exist_ok=True)
-app.mount("/static/images", StaticFiles(directory=IMAGES_DIR), name="static-images")
+# En un filesystem de solo lectura (Vercel) no se puede crear la carpeta: si no
+# vino en el deploy, se omite el mount en vez de fallar al importar la app.
+try:
+    os.makedirs(IMAGES_DIR, exist_ok=True)
+except OSError:
+    pass
+if os.path.isdir(IMAGES_DIR):
+    app.mount("/static/images", StaticFiles(directory=IMAGES_DIR), name="static-images")
 
 @app.get("/ping")
 def ping():
