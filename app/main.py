@@ -36,7 +36,7 @@ if env_path.exists():
     load_dotenv(env_path)
 
 from app.database import db_conn, pool
-from app import boletas_processor
+from app import boletas_processor, preparacion
 
 # ----------------------------
 # CONFIGURATION & CONSTANTS
@@ -173,6 +173,12 @@ class UpdateDniParams(BaseModel):
 class PeriodoPublish(BaseModel):
     """Publicar/despublicar un periodo de boletas."""
     periodo: str = Field(..., description="Periodo a publicar (YYYY-MM)")
+
+
+class PreparacionConfig(BaseModel):
+    """Dia del mes en que arranca el aviso de monto en preparacion."""
+    dia: Optional[int] = Field(
+        ..., ge=1, le=28, description="Dia del mes (1 a 28), o null para desactivar")
 
 
 class SocioCreate(BaseModel):
@@ -915,4 +921,20 @@ def boletas_unpublish(data: PeriodoPublish, userdata: dict = Depends(get_current
     if not boletas_processor.despublicar_periodo(data.periodo):
         raise HTTPException(status_code=404, detail="Periodo no encontrado")
     return {"periodo": data.periodo, "publicado": False}
+
+
+@app.get("/boletas/preparacion")
+def boletas_preparacion(_: dict = Depends(get_current_user)):
+    """Indica si hay que mostrar el aviso de monto en preparacion."""
+    return preparacion.estado_actual()
+
+
+@app.post("/boletas/preparacion")
+def configurar_preparacion(
+    data: PreparacionConfig, userdata: dict = Depends(get_current_user)
+):
+    """Configura el dia del aviso (admin). Con dia = null lo desactiva."""
+    check_admin(userdata["role"])
+    preparacion.guardar_dia(data.dia)
+    return preparacion.estado_actual()
 

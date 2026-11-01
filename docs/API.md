@@ -145,6 +145,31 @@ Despublica un período (rollback): deja de servirse a los socios.
 
 ---
 
+## Aviso de monto en preparación
+
+El admin elige un día del mes (ej. 27). Desde ese día, a las 00:00 hora argentina,
+el aviso queda activo hasta que se publique un período. Solo es un aviso: `/importe`
+y `/download-pdf` siguen sirviendo el último período publicado.
+
+### `GET /boletas/preparacion`
+Con cualquier token, de socio o de admin.
+```json
+{ "dia": 27, "preparando": true, "mes": "2026-11" }
+```
+- `dia`: día configurado, `null` si el aviso está desactivado.
+- `preparando`: si hay que mostrar el aviso.
+- `mes`: mes siguiente al día de apertura (`YYYY-MM`), `null` si `preparando` es `false`.
+  Es para mostrar y no siempre coincide con el nombre del período que se sube.
+
+### `POST /boletas/preparacion`
+Configura el día (token de admin). Acepta de 1 a 28; `null` desactiva el aviso.
+```json
+{ "dia": 27 }
+```
+Responde igual que el `GET`.
+
+---
+
 ## Admin — sincronización de socios (server-to-server)
 
 ### `POST /sync-socio`

@@ -40,6 +40,12 @@ CREATE TABLE IF NOT EXISTS boleta_periodos (
     created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- Ajustes que el admin cambia desde el panel (clave -> valor).
+CREATE TABLE IF NOT EXISTS configuracion (
+    clave  TEXT PRIMARY KEY,
+    valor  TEXT NOT NULL
+);
+
 -- Backfill idempotente: registrar los periodos que ya existen en boletas.
 INSERT INTO boleta_periodos (periodo)
 SELECT DISTINCT periodo FROM boletas
