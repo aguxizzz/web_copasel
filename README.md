@@ -23,6 +23,15 @@ Dashboard de administrador
 <img width="1238" height="732" alt="admindashboard" src="https://github.com/user-attachments/assets/29fa0fe7-57ec-4ba7-9cd0-8deac5a28e48" />
 
 
+### Tests
+Necesitan Docker: levantan un Postgres descartable y nunca tocan la base del `.env`.
+Los PDFs de R2 se reemplazan por un bucket falso en memoria.
+
+```bash
+pip install -r requirements-dev.txt
+pytest
+```
+
 ---
 Contacto: agustinciancio3@gmail.com!
 
