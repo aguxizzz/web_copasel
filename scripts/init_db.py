@@ -7,7 +7,7 @@ Idempotente. Uso:
 """
 from pathlib import Path
 
-from app.database import db_conn
+from app.database import db_conn, pool
 
 SCHEMA_FILE = Path(__file__).resolve().parent.parent / "app" / "schema.sql"
 
@@ -18,6 +18,8 @@ def main() -> None:
         with conn.cursor() as cur:
             cur.execute(sql)
         conn.commit()
+    # Sin esto, Python 3.14 tira un error al apagarse con el pool todavia abierto.
+    pool.close()
     print("Esquema aplicado correctamente.")
 
 
