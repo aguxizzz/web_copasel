@@ -91,13 +91,20 @@ def upload_sector_pdf_file(periodo: str, sector: str, path) -> None:
         ExtraArgs={"ContentType": "application/pdf"},
         Config=_TRANSFER_CONFIG,
     )
+    # Si se re-sube un periodo las paginas pueden moverse: con el PDF viejo en
+    # cache, un socio descargaria la boleta de otro.
+    _cache_path(periodo, sector).unlink(missing_ok=True)
+
+
+def _cache_path(periodo: str, sector: str) -> Path:
+    return CACHE_DIR / periodo / f"{sector}.pdf"
 
 
 def get_sector_pdf_path(periodo: str, sector: str) -> Path:
     """
     Ruta local al PDF de sector, descargándolo de R2 a la cache si no está.
     """
-    local = CACHE_DIR / periodo / f"{sector}.pdf"
+    local = _cache_path(periodo, sector)
     if not local.is_file():
         local.parent.mkdir(parents=True, exist_ok=True)
         _get_client().download_file(
